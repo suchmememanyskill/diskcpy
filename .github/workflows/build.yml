@@ -1,0 +1,27 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: diskcpy-windows-release
+          path: target/release/diskcpy.exe
+          if-no-files-found: error

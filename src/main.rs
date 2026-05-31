@@ -307,10 +307,20 @@ fn copy_with_progress(
 
     print_progress(0, total_bytes, started_at)?;
 
-    loop {
-        let read = reader.read(&mut buffer)?;
+    while written < total_bytes {
+        let remaining = total_bytes - written;
+        let chunk_len = usize::try_from(remaining.min(block_size as u64)).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "remaining byte count does not fit in memory",
+            )
+        })?;
+        let read = reader.read(&mut buffer[..chunk_len])?;
         if read == 0 {
-            break;
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "source ended before the reported size was fully copied",
+            ));
         }
 
         writer.write_all(&buffer[..read])?;

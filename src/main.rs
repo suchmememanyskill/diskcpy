@@ -20,13 +20,30 @@ use windows::core::PCWSTR;
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
 
+const CC1_EMMC_SIZE: u64 = 7650410496;
+const CC2_EMMC_SIZE: u64 = 7837581312;
+
 #[derive(Debug, Parser)]
-#[command(author, version, about = "Copy between files and raw Windows disks")]
+#[command(
+    author, 
+    version, 
+    about = "Copy between files and raw Windows disks",
+    long_about = "A utility to clone raw eMMC storage devices. To identify physical drives, run this command in PowerShell:\n\n  Get-CimInstance Win32_DiskDrive | Select-Object DeviceID, Model, Size\n\nTo target a physical drive on Windows, use the \\\\.\\PhysicalDriveX format.",
+    after_help = "EXAMPLES:\n  Backup Drive:      diskcpy.exe \\\\.\\PhysicalDrive2 backup-emmc.img\n  Manual Truncate:   diskcpy.exe \\\\.\\PhysicalDrive2 backup.img --count 8gb\n  Flash Image Back:  diskcpy.exe backup-emmc.img \\\\.\\PhysicalDrive2"
+)]
 struct Args {
+    /// Source file path or raw device path (e.g. \\\\.\\PhysicalDrive2)
     source: PathBuf,
+    
+    /// Destination file path or raw device path
     destination: PathBuf,
+    
     #[arg(long, default_value = "512kb", value_parser = parse_block_size)]
     blocksize: u64,
+    
+    /// Stop copying after reaching this limit (e.g. 8gb, or exact sizes: CC1 = 7650410496, CC2 = 7837581312)
+    #[arg(long, value_parser = parse_block_size)]
+    count: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -54,7 +71,35 @@ fn main() -> AppResult<()> {
         return Err("blocksize must be a multiple of 512 bytes when reading from or writing to a raw device".into());
     }
 
-    let total_bytes = source.size()?;
+    let mut total_bytes = source.size()?;
+
+    if let Some(count) = args.count {
+        if count == 0 {
+            return Err("count must be greater than zero".into());
+        }
+        if count > total_bytes {
+            return Err(format!(
+                "requested count ({}) is larger than the source size ({})",
+                format_bytes(count),
+                format_bytes(total_bytes)
+            ).into());
+        }
+        total_bytes = count;
+    } else if source.is_device() && !destination.is_device() {
+        let filename_lower = destination.path.to_string_lossy().to_ascii_lowercase();
+        if filename_lower.contains("cc1") {
+            if total_bytes >= CC1_EMMC_SIZE {
+                println!("Auto-profile: Truncating capture window to CC1 exact size ({}).", format_bytes(CC1_EMMC_SIZE));
+                total_bytes = CC1_EMMC_SIZE;
+            }
+        } else if filename_lower.contains("cc2") {
+            if total_bytes >= CC2_EMMC_SIZE {
+                println!("Auto-profile: Truncating capture window to CC2 exact size ({}).", format_bytes(CC2_EMMC_SIZE));
+                total_bytes = CC2_EMMC_SIZE;
+            }
+        }
+    }
+
     validate_destination_capacity(&destination, total_bytes)?;
 
     if destination.is_device() && total_bytes % 512 != 0 {
@@ -241,8 +286,8 @@ fn nearest_existing_directory(path: &Path) -> AppResult<PathBuf> {
     } else {
         path.parent()
             .filter(|parent| !parent.as_os_str().is_empty())
-            .map(Path::to_path_buf)
-            .unwrap_or(std::env::current_dir()?)
+                .map(Path::to_path_buf)
+                .unwrap_or(std::env::current_dir()?)
     };
 
     if candidate.is_relative() {

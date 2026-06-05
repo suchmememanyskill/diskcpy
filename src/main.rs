@@ -20,9 +20,6 @@ use windows::core::PCWSTR;
 
 type AppResult<T> = Result<T, Box<dyn Error>>;
 
-const CC1_EMMC_SIZE: u64 = 7650410496;
-const CC2_EMMC_SIZE: u64 = 7837581312;
-
 #[derive(Debug, Parser)]
 #[command(
     author, 
@@ -41,7 +38,7 @@ struct Args {
     #[arg(long, default_value = "512kb", value_parser = parse_block_size)]
     blocksize: u64,
     
-    /// Stop copying after reaching this limit (e.g. 8gb, or exact sizes: CC1 = 7650410496, CC2 = 7837581312)
+    /// Stop copying after reaching this limit (e.g. 8gb, or an exact byte count)
     #[arg(long, value_parser = parse_block_size)]
     count: Option<u64>,
 }
@@ -85,19 +82,6 @@ fn main() -> AppResult<()> {
             ).into());
         }
         total_bytes = count;
-    } else if source.is_device() && !destination.is_device() {
-        let filename_lower = destination.path.to_string_lossy().to_ascii_lowercase();
-        if filename_lower.contains("cc1") {
-            if total_bytes >= CC1_EMMC_SIZE {
-                println!("Auto-profile: Truncating capture window to CC1 exact size ({}).", format_bytes(CC1_EMMC_SIZE));
-                total_bytes = CC1_EMMC_SIZE;
-            }
-        } else if filename_lower.contains("cc2") {
-            if total_bytes >= CC2_EMMC_SIZE {
-                println!("Auto-profile: Truncating capture window to CC2 exact size ({}).", format_bytes(CC2_EMMC_SIZE));
-                total_bytes = CC2_EMMC_SIZE;
-            }
-        }
     }
 
     validate_destination_capacity(&destination, total_bytes)?;

@@ -22,8 +22,8 @@ type AppResult<T> = Result<T, Box<dyn Error>>;
 
 #[derive(Debug, Parser)]
 #[command(
-    author, 
-    version, 
+    author,
+    version,
     about = "Copy between files and raw Windows disks",
     long_about = "A utility to clone raw eMMC storage devices. To identify physical drives, run this command in PowerShell:\n\n  Get-CimInstance Win32_DiskDrive | Select-Object DeviceID, Model, Size\n\nTo target a physical drive on Windows, use the \\\\.\\PhysicalDriveX format.",
     after_help = "EXAMPLES:\n  Backup Drive:      diskcpy.exe \\\\.\\PhysicalDrive2 backup-emmc.img\n  Manual Truncate:   diskcpy.exe \\\\.\\PhysicalDrive2 backup.img --count 8gb\n  Flash Image Back:  diskcpy.exe backup-emmc.img \\\\.\\PhysicalDrive2"
@@ -31,15 +31,15 @@ type AppResult<T> = Result<T, Box<dyn Error>>;
 struct Args {
     /// Source file path or raw device path (e.g. \\\\.\\PhysicalDrive2)
     source: PathBuf,
-    
+
     /// Destination file path or raw device path
     destination: PathBuf,
-    
+
     #[arg(long, default_value = "512kb", value_parser = parse_block_size)]
     blocksize: u64,
-    
+
     /// Stop copying after reaching this limit (e.g. 8gb, or an exact byte count)
-    #[arg(long, value_parser = parse_block_size)]
+    #[arg(long, value_parser = parse_count)]
     count: Option<u64>,
 }
 
@@ -79,7 +79,8 @@ fn main() -> AppResult<()> {
                 "requested count ({}) is larger than the source size ({})",
                 format_bytes(count),
                 format_bytes(total_bytes)
-            ).into());
+            )
+            .into());
         }
         total_bytes = count;
     }
@@ -170,9 +171,19 @@ impl Endpoint {
 }
 
 fn parse_block_size(value: &str) -> Result<u64, String> {
+    parse_human_readable_size(value)
+        .map_err(|message| format!("failed to parse block size: {message}"))
+}
+
+fn parse_count(value: &str) -> Result<u64, String> {
+    parse_human_readable_size(value)
+        .map_err(|message| format!("failed to parse count: {message}"))
+}
+
+fn parse_human_readable_size(value: &str) -> Result<u64, String> {
     let normalized = value.trim().to_ascii_lowercase();
     if normalized.is_empty() {
-        return Err("blocksize cannot be empty".to_string());
+        return Err("cannot be empty".to_string());
     }
 
     let digits_len = normalized
@@ -181,12 +192,12 @@ fn parse_block_size(value: &str) -> Result<u64, String> {
         .count();
 
     if digits_len == 0 {
-        return Err(format!("invalid blocksize: {value}"));
+        return Err(format!("invalid value: {value}"));
     }
 
     let number: u64 = normalized[..digits_len]
         .parse()
-        .map_err(|_| format!("invalid blocksize: {value}"))?;
+        .map_err(|_| format!("invalid value: {value}"))?;
     let suffix = normalized[digits_len..].trim();
 
     let multiplier = match suffix {
@@ -195,12 +206,12 @@ fn parse_block_size(value: &str) -> Result<u64, String> {
         "m" | "mb" | "mib" => 1024_u64.pow(2),
         "g" | "gb" | "gib" => 1024_u64.pow(3),
         "t" | "tb" | "tib" => 1024_u64.pow(4),
-        _ => return Err(format!("unsupported blocksize suffix in {value}")),
+        _ => return Err(format!("unsupported suffix in {value}")),
     };
 
     number
         .checked_mul(multiplier)
-        .ok_or_else(|| format!("blocksize is too large: {value}"))
+        .ok_or_else(|| format!("value is too large: {value}"))
 }
 
 fn validate_destination_capacity(destination: &Endpoint, source_size: u64) -> AppResult<()> {
@@ -270,8 +281,8 @@ fn nearest_existing_directory(path: &Path) -> AppResult<PathBuf> {
     } else {
         path.parent()
             .filter(|parent| !parent.as_os_str().is_empty())
-                .map(Path::to_path_buf)
-                .unwrap_or(std::env::current_dir()?)
+            .map(Path::to_path_buf)
+            .unwrap_or(std::env::current_dir()?)
     };
 
     if candidate.is_relative() {
@@ -433,4 +444,32 @@ fn is_device_path(path: &Path) -> bool {
 
 fn wide_null(value: &OsStr) -> Vec<u16> {
     value.encode_wide().chain(std::iter::once(0)).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_human_readable_size;
+
+    #[test]
+    fn parses_raw_byte_count() {
+        assert_eq!(parse_human_readable_size("512").unwrap(), 512);
+    }
+
+    #[test]
+    fn parses_kilobyte_suffixes() {
+        assert_eq!(parse_human_readable_size("512kb").unwrap(), 512 * 1024);
+        assert_eq!(parse_human_readable_size("512kib").unwrap(), 512 * 1024);
+    }
+
+    #[test]
+    fn parses_megabyte_suffixes_case_insensitively() {
+        assert_eq!(parse_human_readable_size("5mb").unwrap(), 5 * 1024 * 1024);
+        assert_eq!(parse_human_readable_size("5mib").unwrap(), 5 * 1024 * 1024);
+        assert_eq!(parse_human_readable_size("5MiB").unwrap(), 5 * 1024 * 1024);
+    }
+
+    #[test]
+    fn rejects_unsupported_suffixes() {
+        assert!(parse_human_readable_size("5xb").is_err());
+    }
 }

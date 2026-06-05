@@ -5,7 +5,7 @@ use clap::Parser;
 use std::error::Error;
 use std::ffi::OsStr;
 use std::fs::{File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::mem::size_of;
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::OpenOptionsExt;
@@ -41,6 +41,10 @@ struct Args {
     /// Stop copying after reaching this limit (e.g. 8gb, or an exact byte count)
     #[arg(long, value_parser = parse_count)]
     count: Option<u64>,
+
+    /// Skip this many bytes from the start of the source before copying
+    #[arg(long, default_value = "0", value_parser = parse_skip)]
+    skip: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -68,22 +72,12 @@ fn main() -> AppResult<()> {
         return Err("blocksize must be a multiple of 512 bytes when reading from or writing to a raw device".into());
     }
 
-    let mut total_bytes = source.size()?;
-
-    if let Some(count) = args.count {
-        if count == 0 {
-            return Err("count must be greater than zero".into());
-        }
-        if count > total_bytes {
-            return Err(format!(
-                "requested count ({}) is larger than the source size ({})",
-                format_bytes(count),
-                format_bytes(total_bytes)
-            )
-            .into());
-        }
-        total_bytes = count;
+    if source.is_device() && args.skip % 512 != 0 {
+        return Err("skip must be a multiple of 512 bytes when reading from a raw device".into());
     }
+
+    let source_size = source.size()?;
+    let total_bytes = copy_size_after_skip(source_size, args.skip, args.count)?;
 
     validate_destination_capacity(&destination, total_bytes)?;
 
@@ -97,8 +91,9 @@ fn main() -> AppResult<()> {
         usize::try_from(args.blocksize).map_err(|_| "blocksize is too large for this platform")?;
 
     let mut reader = source.open_for_read()?;
-    let mut writer = destination.open_for_write()?;
+    reader.seek(SeekFrom::Start(args.skip))?;
 
+    let mut writer = destination.open_for_write()?;
     copy_with_progress(&mut reader, &mut writer, total_bytes, block_size)?;
     println!("Copied {}.", format_bytes(total_bytes));
 
@@ -176,8 +171,11 @@ fn parse_block_size(value: &str) -> Result<u64, String> {
 }
 
 fn parse_count(value: &str) -> Result<u64, String> {
-    parse_human_readable_size(value)
-        .map_err(|message| format!("failed to parse count: {message}"))
+    parse_human_readable_size(value).map_err(|message| format!("failed to parse count: {message}"))
+}
+
+fn parse_skip(value: &str) -> Result<u64, String> {
+    parse_human_readable_size(value).map_err(|message| format!("failed to parse skip: {message}"))
 }
 
 fn parse_human_readable_size(value: &str) -> Result<u64, String> {
@@ -244,6 +242,45 @@ fn validate_destination_capacity(destination: &Endpoint, source_size: u64) -> Ap
     }
 
     Ok(())
+}
+
+fn copy_size_after_skip(source_size: u64, skip: u64, count: Option<u64>) -> AppResult<u64> {
+    if skip > source_size {
+        return Err(format!(
+            "requested skip ({}) is larger than the source size ({})",
+            format_bytes(skip),
+            format_bytes(source_size)
+        )
+        .into());
+    }
+
+    let Some(count) = count else {
+        return Ok(source_size - skip);
+    };
+
+    if count == 0 {
+        return Err("count must be greater than zero".into());
+    }
+
+    let copy_end = skip.checked_add(count).ok_or_else(|| {
+        format!(
+            "requested skip ({}) plus count ({}) is too large",
+            format_bytes(skip),
+            format_bytes(count)
+        )
+    })?;
+
+    if copy_end > source_size {
+        return Err(format!(
+            "requested skip ({}) plus count ({}) exceeds the source size ({})",
+            format_bytes(skip),
+            format_bytes(count),
+            format_bytes(source_size)
+        )
+        .into());
+    }
+
+    Ok(count)
 }
 
 fn existing_file_length(path: &Path) -> io::Result<u64> {
@@ -448,7 +485,7 @@ fn wide_null(value: &OsStr) -> Vec<u16> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_human_readable_size;
+    use super::{copy_size_after_skip, parse_human_readable_size, parse_skip};
 
     #[test]
     fn parses_raw_byte_count() {
@@ -471,5 +508,25 @@ mod tests {
     #[test]
     fn rejects_unsupported_suffixes() {
         assert!(parse_human_readable_size("5xb").is_err());
+    }
+
+    #[test]
+    fn parses_skip_with_human_readable_size() {
+        assert_eq!(parse_skip("2mb").unwrap(), 2 * 1024 * 1024);
+    }
+
+    #[test]
+    fn count_is_output_size_after_skip() {
+        assert_eq!(copy_size_after_skip(12, 4, Some(8)).unwrap(), 8);
+    }
+
+    #[test]
+    fn copies_remaining_source_when_count_is_omitted() {
+        assert_eq!(copy_size_after_skip(12, 4, None).unwrap(), 8);
+    }
+
+    #[test]
+    fn rejects_skip_plus_count_past_source_size() {
+        assert!(copy_size_after_skip(12, 4, Some(9)).is_err());
     }
 }

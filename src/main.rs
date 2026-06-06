@@ -35,7 +35,7 @@ struct Args {
     /// Destination file path or raw device path
     destination: PathBuf,
 
-    #[arg(long, default_value = "512kb", value_parser = parse_block_size)]
+    #[arg(long, default_value = "512kib", value_parser = parse_block_size)]
     blocksize: u64,
 
     /// Stop copying after reaching this limit (e.g. 8gb, or an exact byte count)
